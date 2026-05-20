@@ -39,6 +39,7 @@ public class TypeAnalyzer {
   private final Set<Class<?>> processedTypes;
   private final Set<String> skippedTypes;
   private final Set<ClassName> discoveredTypes;
+  private final Set<Class<?>> polymorphicallyReachedTypes;
   private final Set<String> printedTypes = new HashSet<>();
   private final Set<String> customParserTypes = new HashSet<>();
   private final ClassFinder classFinder;
@@ -80,6 +81,7 @@ public class TypeAnalyzer {
     processedTypes = new HashSet<>();
     skippedTypes = new HashSet<>();
     discoveredTypes = new TreeSet<>(Comparator.comparing(ClassName::toString));
+    polymorphicallyReachedTypes = new HashSet<>();
   }
 
   /**
@@ -102,8 +104,9 @@ public class TypeAnalyzer {
       skippedTypes.clear();
       discoveredTypes.clear();
       printedTypes.clear();
+      polymorphicallyReachedTypes.clear();
 
-      analyzeTypeAndSubtypes(rootClass);
+      analyzeTypeAndSubtypes(rootClass, true);
 
       if (!skippedTypes.isEmpty()) {
         logger.info("Warning: The following types were not found and skipped:");
@@ -116,56 +119,71 @@ public class TypeAnalyzer {
     }
   }
 
-  private void analyzeTypeAndSubtypes(final Class<?> type) {
+  /**
+   * Polymorphic bases reached directly (as a field type or type argument) in
+   * the most recent analysis. The generator emits a discriminator switch for
+   * these; bases reached only via a concrete subtype's superclass chain are
+   * absent and get a standard parse method instead.
+   */
+  public Set<Class<?>> getPolymorphicallyReachedTypes() {
+    return polymorphicallyReachedTypes;
+  }
+
+  private void analyzeTypeAndSubtypes(final Class<?> type, final boolean reachedDirectly) {
     if (!shouldAnalyzeType(type)) {
       return;
     }
 
-    if (!processedTypes.add(type)) {
-      return; // Already processed
+    final boolean polymorphic = isPolymorphicBase(type);
+    final boolean firstVisit = processedTypes.add(type);
+    final boolean newPolymorphicReach = polymorphic && reachedDirectly && polymorphicallyReachedTypes.add(type);
+
+    if (!firstVisit && !newPolymorphicReach) {
+      return;
     }
 
-    // Print the class hierarchy if we haven't seen this type before
-    if (!printedTypes.contains(type.getName())) {
-      printClassHierarchy(type);
-      printedTypes.add(type.getName());
+    if (firstVisit) {
+      if (!printedTypes.contains(type.getName())) {
+        printClassHierarchy(type);
+        printedTypes.add(type.getName());
+      }
+
+      if (!hasCustomParser(type)) {
+        addTypeForGeneration(type);
+      } else {
+        logger.info("Skipping parser generation for " + type.getName() + " (has custom parser)");
+      }
+
+      // Superclasses are not "directly reached" - if the superclass is a
+      // polymorphic base, sibling subtypes stay unwalked.
+      final Class<?> superclass = type.getSuperclass();
+      if (superclass != null && superclass != Object.class) {
+        analyzeTypeAndSubtypes(superclass, false);
+      }
+
+      for (final Field field : ConstructorAnalyzer.getParseableFields(type)) {
+        try {
+          analyzeField(field);
+        } catch (final TypeNotPresentException e) {
+          skippedTypes.add(e.typeName());
+        }
+      }
     }
 
-    // If this type has a custom parser, skip adding it for generation
-    // but continue analyzing its fields and subtypes
-    if (!hasCustomParser(type)) {
-      addTypeForGeneration(type);
-    } else {
-      logger.info("Skipping parser generation for " + type.getName() + " (has custom parser)");
-    }
-
-    // Find and process superclasses
-    final Class<?> superclass = type.getSuperclass();
-    if (superclass != null && superclass != Object.class) {
-      analyzeTypeAndSubtypes(superclass);
-    }
-
-    final JsonSubTypes subTypesAnnotation = type.getAnnotation(JsonSubTypes.class);
-    final JsonTypeInfo typeInfoAnnotation = type.getAnnotation(JsonTypeInfo.class); // Check presence of base annotation too
-
-    if (subTypesAnnotation != null && typeInfoAnnotation != null) { // Only process if both are present
+    // Only expand @JsonSubTypes when the polymorphic base was reached directly.
+    if (newPolymorphicReach) {
+      final JsonSubTypes subTypesAnnotation = type.getAnnotation(JsonSubTypes.class);
       logger.info("Found @JsonSubTypes on: " + type.getName() + ", analyzing listed subtypes...");
       for (final JsonSubTypes.Type subType : subTypesAnnotation.value()) {
         final Class<?> subTypeValue = subType.value();
         logger.info("  - Analyzing subtype: " + subTypeValue.getName());
-        analyzeTypeAndSubtypes(subTypeValue); // Recursive call for the subtype
+        analyzeTypeAndSubtypes(subTypeValue, true);
       }
     }
+  }
 
-    // Always analyze fields, even for types with custom parsers
-    // This ensures we discover all types that might need parsers
-    for (final Field field : ConstructorAnalyzer.getParseableFields(type)) {
-      try {
-        analyzeField(field);
-      } catch (final TypeNotPresentException e) {
-        skippedTypes.add(e.typeName());
-      }
-    }
+  private boolean isPolymorphicBase(final Class<?> type) {
+    return type.isAnnotationPresent(JsonSubTypes.class) && type.isAnnotationPresent(JsonTypeInfo.class);
   }
 
   private void analyzeField(final Field field) {
@@ -214,12 +232,12 @@ public class TypeAnalyzer {
       if (isUnsupportedType(classType)) {
         throw new UnsupportedTypeException(classType.getName(), "type parameter/element", Object.class);
       }
-      analyzeTypeAndSubtypes(classType);
+      analyzeTypeAndSubtypes(classType, true);
     } else if (type instanceof ParameterizedType) {
       final ParameterizedType paramType = (ParameterizedType) type;
       // Analyze the raw type
       if (paramType.getRawType() instanceof Class<?>) {
-        analyzeTypeAndSubtypes((Class<?>) paramType.getRawType());
+        analyzeTypeAndSubtypes((Class<?>) paramType.getRawType(), true);
       }
       // Analyze all type arguments recursively
       for (final Type typeArg : paramType.getActualTypeArguments()) {

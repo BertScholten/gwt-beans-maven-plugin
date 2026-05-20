@@ -119,13 +119,15 @@ public final class ParserWriterUtils {
   }
 
   /**
-   * Main entry point for generating a parser class.
-   * Creates both parse(String) and parse(JSONObjectHandle) methods.
-   * For constructor-based types (no setters), generates constructor-based parse method.
-   * @param classFinder
+   * Main entry point for generating a parser class. When
+   * {@code usePolymorphicDispatch} is false on a class that has
+   * {@code @JsonTypeInfo}/{@code @JsonSubTypes}, a standard parse method is
+   * emitted instead of the discriminator switch - the caller has determined
+   * the type is reached only via a concrete subtype and the sibling subtype
+   * parsers are not generated.
    */
   public static void generateParserForFields(final TypeSpec.Builder typeSpec, final Class<?> targetClass, final String parserPackage,
-      final ClassFinder classFinder) {
+      final ClassFinder classFinder, final boolean usePolymorphicDispatch) {
     typeSpec.addMethod(createStringParseMethod(targetClass));
 
     // Check if this class should use constructor-based parsing
@@ -136,7 +138,7 @@ public final class ParserWriterUtils {
       typeSpec.addMethod(createConstructorBasedParseMethod(targetClass, parserPackage, constructorInfo.get()));
     } else {
       // Setter-based: existing approach
-      addSetterBasedParseMethods(typeSpec, targetClass, parserPackage);
+      addSetterBasedParseMethods(typeSpec, targetClass, parserPackage, usePolymorphicDispatch);
     }
   }
 
@@ -144,8 +146,8 @@ public final class ParserWriterUtils {
    * Adds setter-based parse methods to the type specification.
    */
   private static void addSetterBasedParseMethods(final TypeSpec.Builder typeSpec, final Class<?> targetClass,
-      final String parserPackage) {
-    if (hasJsonTypeInfoWithNameDiscriminator(targetClass)) {
+      final String parserPackage, final boolean usePolymorphicDispatch) {
+    if (usePolymorphicDispatch) {
       typeSpec.addMethod(createPolymorphicObjectParseMethod(targetClass, parserPackage));
     } else {
       typeSpec.addMethod(createStandardObjectParseMethod(targetClass, parserPackage));

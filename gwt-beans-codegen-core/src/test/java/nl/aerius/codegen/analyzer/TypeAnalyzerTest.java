@@ -12,6 +12,10 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonSubTypes.Type;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonTypeInfo.Id;
 import com.palantir.javapoet.ClassName;
 
 import nl.aerius.codegen.util.ClassFinder;
@@ -48,6 +52,25 @@ class TypeAnalyzerTest {
 
     assertFalse(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_CustomParserType")));
     assertTrue(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_CustomParserTestClass")));
+  }
+
+  @Test
+  void abstractBaseReachedViaConcreteSubtypeOnlyDoesNotExpandSiblings() {
+    final Set<ClassName> types = analyzer.analyzeClass(ConcreteOnlyRootClass.class.getName());
+
+    assertTrue(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_PolySubAlpha")));
+    assertTrue(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_PolyAbstractBase")));
+    assertFalse(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_PolySubBeta")));
+    assertFalse(analyzer.getPolymorphicallyReachedTypes().contains(PolyAbstractBase.class));
+  }
+
+  @Test
+  void abstractBaseReachedDirectlyExpandsAllSubtypes() {
+    final Set<ClassName> types = analyzer.analyzeClass(AbstractFieldRootClass.class.getName());
+
+    assertTrue(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_PolySubAlpha")));
+    assertTrue(types.contains(ClassName.get("nl.aerius.codegen.analyzer", "TypeAnalyzerTest_PolySubBeta")));
+    assertTrue(analyzer.getPolymorphicallyReachedTypes().contains(PolyAbstractBase.class));
   }
 
   @Test
@@ -98,5 +121,30 @@ class TypeAnalyzerTest {
 
   private static class ComplexNestedTestClass {
     private Map<TestEnum, Map<Integer, Map<Integer, String>>> complexNestedMap;
+  }
+
+  @JsonTypeInfo(use = Id.NAME, property = "_type")
+  @JsonSubTypes({
+      @Type(value = PolySubAlpha.class, name = "alpha"),
+      @Type(value = PolySubBeta.class, name = "beta")
+  })
+  private static abstract class PolyAbstractBase {
+    private String baseLabel;
+  }
+
+  private static class PolySubAlpha extends PolyAbstractBase {
+    private int alphaValue;
+  }
+
+  private static class PolySubBeta extends PolyAbstractBase {
+    private boolean betaFlag;
+  }
+
+  private static class ConcreteOnlyRootClass {
+    private PolySubAlpha onlyConcrete;
+  }
+
+  private static class AbstractFieldRootClass {
+    private PolyAbstractBase polymorphic;
   }
 }
